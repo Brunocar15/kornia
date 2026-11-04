@@ -147,9 +147,10 @@ class RandomRotation90(GeometricAugmentationBase2D):
     r"""Apply a random 90 * n degree rotation to a torch.Tensor image or a batch of torch.Tensor images.
 
     Args:
-        times: the range of n times 90 degree rotation needs to be applied.
+        times: inclusive range of integer quarter-turn counts, bounded by
+            -3 and 3. Each integer in the range is sampled with equal probability.
         resample: Default: the interpolation mode.
-        same_on_batch: apply the same transformation across the batch.
+            same_on_batch: apply the same transformation across the batch.
         align_corners: interpolation flag.
         p: probability of applying the transformation.
         keepdim: whether to keep the output shape the same as input (True) or broadcast it
@@ -161,9 +162,14 @@ class RandomRotation90(GeometricAugmentationBase2D):
 
     Convention:
         - See :class:`~kornia.augmentation.GeometricAugmentationBase2D` for coordinates, defaults and inverse.
-        - a positive rounded ``times`` rotates the displayed image counter-clockwise by ``times * 90`` degrees.
-        - ``times`` is sampled from a continuous uniform range and rounded, and a non-square image keeps its
-          ``(H, W)`` shape (`#4409 <https://github.com/kornia/kornia/issues/4409>`_).
+        - a positive quarter-turn count rotates the displayed image
+          counter-clockwise by ``times * 90`` degrees.
+        - sampled quarter-turn counts are uniformly distributed integers.
+        - non-square images support only even quarter-turn counts when the
+          transformation is applied. Applied odd quarter turns raise ValueError
+          in eager execution or RuntimeError during compiled execution.
+          Skipped transformations remain unchanged.
+
 
     .. note::
         This function internally uses :func:`kornia.geometry.transform.affine`. This version is relatively
@@ -206,7 +212,7 @@ class RandomRotation90(GeometricAugmentationBase2D):
         keepdim: bool = False,
     ) -> None:
         super().__init__(p=p, same_on_batch=same_on_batch, keepdim=keepdim)
-        self._param_generator = rg.PlainUniformGenerator((times, "times", 0.0, (-3, 3)))
+        self._param_generator = rg.Rotation90Generator(times)
 
         self.flags = {"resample": Resample.get(resample), "align_corners": align_corners}
 
@@ -214,7 +220,26 @@ class RandomRotation90(GeometricAugmentationBase2D):
         self, input: torch.Tensor, params: dict[str, torch.Tensor], flags: dict[str, Any]
     ) -> torch.Tensor:
         # TODO: Update to use `get_rotation_matrix2d`
-        angles: torch.Tensor = 90.0 * params["times"].round().to(input)
+        # angles: torch.Tensor = 90.0 * params["times"].round().to(input)
+
+        quarter_turns = params["times"].round().to(input)
+
+        height, width = input.shape[-2:]
+        odd_turns = quarter_turns.remainder(2) != 0
+        to_apply = (params["batch_prob"] > 0.5).to(quarter_turns.device)
+        invalid = odd_turns & to_apply
+
+        if height != width:
+            message = "Cannot apply odd quarter turns to non-square images."
+            if torch.compiler.is_compiling():
+                valid = ~invalid.any()
+                if input.device.type == "mps":
+                    valid = valid.to(device="cpu")
+                torch._assert_async(valid, message)
+            elif bool(invalid.any()):
+                raise ValueError(message)
+
+        angles: torch.Tensor = quarter_turns * 90.0
 
         center: torch.Tensor = _compute_tensor_center(input)
         rotation_mat: torch.Tensor = _compute_rotation_matrix(angles, center.expand(angles.shape[0], -1))

@@ -42,6 +42,7 @@ from kornia.augmentation.random_generator import (
     RandomGaussianBlurGenerator,
     RectangleEraseGenerator,
     ResizedCropGenerator,
+    Rotation90Generator,
     center_crop_generator,
 )
 from kornia.augmentation.utils import _truncate_to_start
@@ -2087,3 +2088,47 @@ class TestTruncateToStart:
         draw = torch.rand(1 << 12, device=device, dtype=dtype)
         extent = torch.randint(1, 100, (1 << 12,), device=device).to(dtype)
         assert torch.equal(_truncate_to_start(draw, extent), (draw * extent).floor())
+
+
+@pytest.mark.device_agnostic
+class TestRotation90Generator:
+    def test_same_on_batch(self):
+        generator = Rotation90Generator((-3, 3))
+        times = generator((8, 1, 5, 5), same_on_batch=True)["times"]
+
+        assert times.shape == (8,)
+        assert times.dtype == torch.int64
+        assert ((times >= -3) & (times <= 3)).all()
+        assert (times == times[0]).all()
+
+    @pytest.mark.parametrize("turns", [-3, -1, 0, 1, 3])
+    def test_fixed_range(self, turns):
+        generator = Rotation90Generator((turns, turns))
+        times = generator((8, 1, 5, 5))["times"]
+
+        assert times.shape == (8,)
+        assert (times == turns).all()
+
+    @pytest.mark.parametrize("same_on_batch", [False, True])
+    def test_empty_batch(self, same_on_batch):
+        generator = Rotation90Generator((-1, 1))
+        times = generator((0, 1, 5, 5), same_on_batch=same_on_batch)["times"]
+
+        assert times.shape == (0,)
+        assert times.dtype == torch.int64
+
+    @pytest.mark.parametrize(
+        "times",
+        [
+            (2, -1),
+            (-4, 1),
+            (0, 4),
+            (0.5, 1),
+            (0, 1.5),
+            (float("nan"), 1),
+            (0, float("inf")),
+        ],
+    )
+    def test_invalid_range(self, times):
+        with pytest.raises(ValueError):
+            Rotation90Generator(times)
