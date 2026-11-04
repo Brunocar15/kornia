@@ -263,6 +263,7 @@ class TestConventionGeometricMatrices(BaseTester):
         assert rotation[0, 0].argmax().item() == 2 * 7 + 1
         assert affine[0, 0].argmax().item() == 4 * 7 + 5
 
+    """
     def test_wart_random_rotation90_continuously_samples_then_rounds_4409(self, device, dtype):
         augmentation = K.RandomRotation90((0, 1), p=1.0)
         torch.manual_seed(1)
@@ -278,11 +279,82 @@ class TestConventionGeometricMatrices(BaseTester):
         output = augmentation(x, params=params)
         assert output[0, 0].argmax().item() == 2 * 7 + 1
         assert output[1, 0].argmax().item() == 1 * 7 + 4
+    """
 
     @pytest.mark.device_agnostic
-    def test_wart_random_rotation90_keeps_non_square_shape_4409(self):
-        x = torch.zeros(1, 1, 5, 7)
-        assert K.RandomRotation90((1, 1), p=1.0)(x).shape == x.shape
+    @pytest.mark.parametrize("low,high", [(-1, 1), (0, 3)])
+    def test_random_rotation90_uniform_integer_sampling_4409(self, low, high):
+        augmentation = K.RandomRotation90((low, high), p=1.0)
+
+        with torch.random.fork_rng(devices=[]):
+            torch.manual_seed(4409)
+            params = augmentation.forward_parameters((120_000, 1, 3, 3))
+
+        times = params["times"]
+
+        assert times.dtype == torch.int64
+        assert ((times >= low) & (times <= high)).all()
+
+        number_of_choices = high - low + 1
+        counts = torch.bincount(times - low, minlength=number_of_choices)
+        frequencies = counts.float() / times.numel()
+        expected_frequency = 1.0 / number_of_choices
+        assert ((frequencies - expected_frequency).abs() < 0.01).all()
+
+    @pytest.mark.device_agnostic
+    @pytest.mark.parametrize("turns", [-3, -1, 1, 3])
+    # def test_wart_random_rotation90_keeps_non_square_shape_4409(self):
+    # x = torch.zeros(1, 1, 5, 7)
+    # assert K.RandomRotation90((1, 1), p=1.0)(x).shape == x.shape
+    def test_random_rotation90_rejects_non_square_odd_turns_4409(self, turns):
+        image = torch.arange(35, dtype=torch.float32).reshape(1, 1, 5, 7)
+        augmentation = K.RandomRotation90((turns, turns), p=1.0)
+        with pytest.raises(ValueError, match="non-square"):
+            augmentation(image)
+
+    @pytest.mark.device_agnostic
+    @pytest.mark.parametrize("turns", [-2, 0, 2])
+    def test_random_rotation90_allows_non_square_even_turns_4409(self, turns):
+        image = torch.arange(1, 36, dtype=torch.float32).reshape(1, 1, 5, 7)
+
+        actual = K.RandomRotation90((turns, turns), p=1.0)(image)
+        expected = torch.rot90(image, turns, dims=(-2, -1))
+
+        torch.testing.assert_close(actual, expected, atol=1e-5, rtol=1e-5)
+
+    @pytest.mark.device_agnostic
+    def test_random_rotation90_skips_non_square_odd_turns_4409(self):
+        image = torch.arange(1, 36, dtype=torch.float32).reshape(1, 1, 5, 7)
+
+        actual = K.RandomRotation90((1, 1), p=0.0)(image)
+
+        torch.testing.assert_close(actual, image)
+
+    @pytest.mark.device_agnostic
+    def test_random_rotation90_non_square_mixed_batch_4409(self):
+        images = torch.arange(1, 31, dtype=torch.float32).reshape(2, 1, 3, 5)
+        augmentation = K.RandomRotation90((0, 3), p=0.5)
+        params = augmentation.forward_parameters(images.shape)
+
+        # Apply 180 degrees to the first image; skip the second image.
+        params["times"] = images.new_tensor([2.0, 1.0])
+        params["batch_prob"] = images.new_tensor([1.0, 0.0])
+
+        actual = augmentation(images, params=params)
+        expected = torch.stack(
+            [
+                torch.rot90(images[0], 2, dims=(-2, -1)),
+                images[1],
+            ]
+        )
+
+        torch.testing.assert_close(actual, expected, atol=1e-5, rtol=1e-5)
+
+        # Selecting the second image now makes its odd rotation invalid.
+        params["batch_prob"] = images.new_tensor([1.0, 1.0])
+
+        with pytest.raises(ValueError, match="non-square"):
+            augmentation(images, params=params)
 
     @pytest.mark.device_agnostic
     def test_wart_align_corners_defaults_split_geometric_augmentations_4412(self):
@@ -317,6 +389,63 @@ class TestConventionGeometricMatrices(BaseTester):
         }
         perspective_output = K.RandomPerspective(0.5, p=1.0)(x, params=perspective_params)
         rotation_output = K.RandomRotation((45.0, 45.0), p=1.0)(x)
-        rotation90_output = K.RandomRotation90((1, 1), p=1.0)(x)
-        for border in (perspective_output[..., 0, :], rotation_output[..., 0, 0], rotation90_output[..., :, 0]):
+        for border in (
+            perspective_output[..., 0, :],
+            rotation_output[..., 0, 0],
+        ):
             self.assert_close(border, torch.zeros_like(border))
+
+        square = torch.arange(25, device=device, dtype=dtype).reshape(1, 1, 5, 5)
+        rotation90_output = K.RandomRotation90((1, 1), p=1.0)(square)
+        expected = torch.rot90(square, 1, dims=(-2, -1))
+        self.assert_close(rotation90_output, expected)
+
+    @pytest.mark.device_agnostic
+    def test_legacy_state_dict_times_range_updates_sampling(self):
+        augmentation = K.RandomRotation90((0, 0), p=1.0)
+        augmentation.load_state_dict(
+            {"_param_generator.times": torch.tensor([2.0, 2.0])},
+            strict=True,
+        )
+
+        times = augmentation.forward_parameters((64, 1, 5, 7))["times"]
+
+        assert times.dtype == torch.int64
+        assert torch.equal(times, torch.full_like(times, 2))
+
+    @pytest.mark.device_agnostic
+    def test_dynamo_random_rotation90_rectangular_validation(self):
+        aug = K.RandomRotation90((0, 3), p=0.5)
+
+        def apply(x, times, batch_prob):
+            return aug(x, params={"times": times, "batch_prob": batch_prob})
+
+        compiled = torch.compile(apply, backend="eager", fullgraph=True)
+        image = torch.arange(1, 16, dtype=torch.float32).reshape(1, 1, 3, 5)
+
+        actual = compiled(image, torch.tensor([2]), torch.tensor([1.0]))
+        torch.testing.assert_close(
+            actual,
+            torch.rot90(image, 2, dims=(-2, -1)),
+            atol=1e-5,
+            rtol=1e-5,
+        )
+
+        skipped = compiled(image, torch.tensor([1]), torch.tensor([0.0]))
+        torch.testing.assert_close(skipped, image)
+
+        batch = torch.arange(1, 31, dtype=torch.float32).reshape(2, 1, 3, 5)
+        mixed = compiled(batch, torch.tensor([2, 1]), torch.tensor([1.0, 0.0]))
+        expected = torch.stack(
+            [
+                torch.rot90(batch[0], 2, dims=(-2, -1)),
+                batch[1],
+            ]
+        )
+        torch.testing.assert_close(mixed, expected, atol=1e-5, rtol=1e-5)
+
+        with pytest.raises(RuntimeError, match="odd quarter turns"):
+            compiled(image, torch.tensor([1]), torch.tensor([1.0]))
+
+        with pytest.raises(RuntimeError, match="odd quarter turns"):
+            compiled(batch, torch.tensor([2, 1]), torch.tensor([1.0, 1.0]))

@@ -775,7 +775,8 @@ class TestRandomRotation90(CommonTests):
         self._test_cardinality_implementation(
             input_shape=input_shape,
             expected_output_shape=expected_output_shape,
-            params=self._default_param_set,
+            # params=self._default_param_set,
+            params={**self._default_param_set, "times": (2, 2)},
         )
 
     def test_random_p_1(self):
@@ -826,6 +827,11 @@ class TestRandomRotation90(CommonTests):
             self._create_augmentation_from_params(times="")
         with pytest.raises(ValueError, match=r"times out of bounds"):
             self._create_augmentation_from_params(times=(30, 60), align_corners=0)
+
+    def test_smoke(self, param_set):
+        params = {**param_set, "times": (2, 2)}
+        self._test_smoke_implementation(params=params)
+        self._test_smoke_call_implementation(params=params)
 
 
 class TestRandomGrayscaleAlternative(CommonTests):
